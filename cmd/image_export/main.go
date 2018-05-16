@@ -1,0 +1,219 @@
+/*
+image_export <image> <tar file>
+Docker save image and combine all layers to tar file.
+*/
+package main
+
+import (
+	"archive/tar"
+	. "github.com/timocompose/docker-image-tools"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"io/ioutil"
+	"log"
+	"os"
+	"path/filepath"
+)
+
+func main() {
+	var opt Options
+	AddQuietFlag(&opt)
+	AddFromFlag(&opt)
+	AddSaveDirFlag(&opt)
+	AddLayerCount(&opt)
+	flag.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: image_export [options] <image> <tar file>")
+		fmt.Fprintln(os.Stderr, "Docker save <image> and combine all layers to <tar file>.")
+		fmt.Fprintln(os.Stderr, "Options:")
+		flag.PrintDefaults()
+		os.Exit(0)
+	}
+	flag.Parse()
+
+	args := flag.Args()
+	if len(args) != 2 {
+		log.Println("usage image_export <image> <tar file>")
+		log.Fatal("image_export --help for more information")
+	}
+	if err := imageExport(args[0], args[1], &opt); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func imageExport(image string, tarPath string, opt *Options) error {
+	tempDir, err := ioutil.TempDir(filepath.Dir(tarPath), "tmp")
+	if err != nil {
+		return LError(err)
+	}
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			log.Print(err)
+		}
+	}()
+
+	if !NameHasTag(image) {
+		image += ":latest"
+	}
+
+	var saveDir string
+	if opt.SaveDir != "" {
+		saveDir = opt.SaveDir
+	} else {
+		saveDir = filepath.Join(tempDir, "save")
+		if err := os.Mkdir(saveDir, 0770); err != nil {
+			return LError(err)
+		}
+
+		cmd := Command(
+			"docker",
+			"save",
+			image,
+		)
+		stdOutRdr, err := cmd.StdoutPipe()
+		if err != nil {
+			return LError(err)
+		}
+		tarCmd := Command("tar", "-C", saveDir, "-xf", "-")
+		tarCmd.Stdin = stdOutRdr
+		if !opt.Quiet {
+			log.Printf("saving %s", image)
+		}
+		if err := tarCmd.Start(); err != nil {
+			return LError(err)
+		}
+		if err := cmd.Start(); err != nil {
+			return LError(err)
+		}
+		if err := cmd.Wait(); err != nil {
+			return LError(err)
+		}
+		if err := tarCmd.Wait(); err != nil {
+			return LError(err)
+		}
+	}
+
+	manifestPath := filepath.Join(saveDir, "manifest.json")
+	file, err := os.Open(manifestPath)
+	if err != nil {
+		return LError(err)
+	}
+	jsonDec := json.NewDecoder(file)
+	var manifestFile []ManifestStruct
+	if err := jsonDec.Decode(&manifestFile); err != nil {
+		return LError(err)
+	}
+	file.Close()
+	if len(manifestFile) != 1 {
+		return LError(fmt.Errorf("%s has unexpected format", manifestPath))
+	}
+	manifest := manifestFile[0]
+
+	// number of layers to export
+	layerCount := len(manifest.Layers)
+
+	if opt.BaseImage != "" {
+		if !NameHasTag(opt.BaseImage) {
+			opt.BaseImage += ":latest"
+		}
+		cmd := Command(
+			"docker",
+			"inspect",
+			"--type",
+			"image",
+			opt.BaseImage,
+			image,
+		)
+		inspectStdOutRdr, err := cmd.StdoutPipe()
+		if err != nil {
+			return LError(err)
+		}
+		if err := cmd.Start(); err != nil {
+			return LError(err)
+		}
+		var inspectOutput []InspectStruct
+		if err := json.NewDecoder(inspectStdOutRdr).Decode(&inspectOutput); err != nil {
+			return LError(err)
+		}
+		if err := cmd.Wait(); err != nil {
+			return LError(err)
+		}
+		if len(inspectOutput) != 2 {
+			return LError(fmt.Errorf("docker inspect returned %d images want 2", len(inspectOutput)))
+		}
+		inspectOutputId := map[int]string{
+			0: opt.BaseImage,
+			1: image,
+		}
+		layers := make(map[string][]string)
+		for i, inspect := range inspectOutput {
+			if len(inspect.RootFS.Layers) == 0 {
+				return LError(fmt.Errorf("docker inspect image %s has no layers", inspectOutputId[i]))
+			}
+			layers[inspectOutputId[i]] = inspectOutput[i].RootFS.Layers
+		}
+		nCommon := 0
+		// layer lists are SHAs identifying docker layers
+		// count number of common layers
+		for i, layer := range layers[opt.BaseImage] {
+			if layer != layers[image][i] {
+				break
+			}
+			nCommon++
+		}
+		nDiff := len(layers[image]) - nCommon
+		if nCommon == 0 {
+			return LError(fmt.Errorf("image %s is not derived from image %s", image, opt.BaseImage))
+		} else if nDiff == 0 {
+			// should this be an error?
+			return LError(fmt.Errorf("image %s is the same as %s", image, opt.BaseImage))
+		}
+
+		// Here we are assuming that there is a one to one relationship between layer tarball list from docker save,
+		// and the layer SHA list from docker inspect.
+		layerCount = nDiff
+	}
+
+	if opt.LayerCount != 0 {
+		layerCount = opt.LayerCount
+	}
+
+	if !opt.Quiet {
+		log.Printf("combining layers")
+	}
+	tarFile, err := os.Create(tarPath)
+	if err != nil {
+		return LError(err)
+	}
+	tarWtr := tar.NewWriter(tarFile)
+	for _, layerTar := range manifest.Layers[len(manifest.Layers)-layerCount:] {
+		lyrFile, err := os.Open(filepath.Join(saveDir, layerTar))
+		if err != nil {
+			return LError(err)
+		}
+		tarRdr := tar.NewReader(lyrFile)
+		for {
+			header, err := tarRdr.Next()
+			if err == io.EOF {
+				break
+			} else if err != nil {
+				return LError(err)
+			}
+			if err := tarWtr.WriteHeader(header); err != nil {
+				return LError(err)
+			}
+			if _, err := io.Copy(tarWtr, tarRdr); err != nil {
+				return LError(err)
+			}
+		}
+		lyrFile.Close()
+	}
+	if err := tarWtr.Close(); err != nil {
+		LError(err)
+	}
+	if err := tarFile.Close(); err != nil {
+		LError(err)
+	}
+	return nil
+}
