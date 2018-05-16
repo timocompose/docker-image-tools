@@ -1,7 +1,6 @@
 package test
 
 import (
-	. "compose/build-tools"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -11,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	. "github.com/timocompose/docker-image-tools"
 )
 
 type mockFile struct {
