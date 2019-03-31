@@ -15,6 +15,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 )
 
 func main() {
@@ -187,7 +189,13 @@ func imageExport(image string, tarPath string, opt *Options) error {
 		return LError(err)
 	}
 	tarWtr := tar.NewWriter(tarFile)
-	for _, layerTar := range manifest.Layers[len(manifest.Layers)-layerCount:] {
+
+	deletedPaths := make([]string, 0, 100)
+	existingPaths := make(map[string]struct{})
+	firstLyr := len(manifest.Layers) - layerCount
+	// build from top layer downward, so as to exclude any deleted files
+	for i := len(manifest.Layers) - 1; i >= firstLyr; i-- {
+		layerTar := manifest.Layers[i]
 		lyrFile, err := os.Open(filepath.Join(saveDir, layerTar))
 		if err != nil {
 			return LError(err)
@@ -200,9 +208,28 @@ func imageExport(image string, tarPath string, opt *Options) error {
 			} else if err != nil {
 				return LError(err)
 			}
+
+			// if deleted ignore
+			if matchPath(header.Name, deletedPaths) {
+				continue
+			}
+			// build up sorted list of deleted paths
+			if base := filepath.Base(header.Name); strings.HasPrefix(base, ".wh.") {
+				path := filepath.Join(filepath.Dir(header.Name), strings.TrimPrefix(base, ".wh."))
+				deletedPaths = append(deletedPaths, path)
+				sort.Strings(deletedPaths)
+				continue
+			}
+
+			if _, ok := existingPaths[header.Name]; ok {
+				continue
+			}
+			existingPaths[header.Name] = struct{}{}
+
 			if err := tarWtr.WriteHeader(header); err != nil {
 				return LError(err)
 			}
+
 			if _, err := io.Copy(tarWtr, tarRdr); err != nil {
 				return LError(err)
 			}
@@ -216,4 +243,41 @@ func imageExport(image string, tarPath string, opt *Options) error {
 		LError(err)
 	}
 	return nil
+}
+
+// do binary search here because sort package binary search is hard to use
+func matchPath(path string, paths []string) bool {
+	low := 0
+	high := len(paths)
+	if high == 0 {
+		return false
+	}
+	pos := (high - low)/2
+	for {
+		entry := paths[pos]
+		if strings.HasPrefix(path, entry) {
+			if len(entry) == len(path) {
+				// path == entry
+				return true
+			} else if path[len(entry)] == '/' {
+				// If we have an entry that is the direcotry part of
+				// path. Then if must be a directory.
+				return true
+			}
+		}
+		if path < entry {
+			high = pos
+			pos = low + (pos - low) / 2
+			if pos == high {
+				break
+			}
+		} else {
+			low = pos
+			pos = pos + (high - pos) / 2
+			if low == pos {
+				break
+			}
+		}
+	}
+	return false
 }

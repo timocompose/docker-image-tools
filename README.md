@@ -1,13 +1,15 @@
 ## Docker image tools
 
-Tools to create images and tarballs from Docker images.
+Tools to work with Docker images.
 
 ### Tools
 
 #### cmd/image_export
-Image export creates a tar file from all layers in image in local Docker daemon.
-`-from` creates a differential tar containing only layers above given Docker 
-image. 
+Image export creates a tar file of all layers from an image in a Docker daemon (only local for now).
+Layers with whiteout files for deletions and rewritten files between layers are
+handled correctly. `-from` creates a differential tar containing only layers above given Docker
+image. This can be used for example: to create a tar that can be used to update scripts in a
+deployed service, create redistributable packages.
 
 ##### Usage
 ```
@@ -23,22 +25,3 @@ Options:
   -save-dir <dir>
         Don't run docker save, use <dir> containing layers from previous docker save.
 ```
-
-##### Notes
-Layers with whiteout files for deletions between layers are not handled 
-currently.
-
-#### cmd/make_slug
-Creates slug tgz file from the given tar file and metadata file.
-
-##### Usage
-```
-Usage: make_slug [options] <tar file> <metadata conf file> <tgz file>
-Create output <tgz file> if slug format with <tar file> as "diff.tar" and <metadata conf file> as "METADATA/conf".
-Options:
-  -quiet
-        Disable info logging.
-```
-
-
-

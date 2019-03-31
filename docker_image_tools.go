@@ -1,4 +1,4 @@
-package buildtools
+package dockerimagetools
 
 import (
 	"flag"

@@ -1,7 +1,6 @@
 package test
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -52,6 +51,13 @@ var dockerfilesFs = mockFilesystem{
 					FROM image1
 					ADD rootfs /
 					RUN echo -n "mockFile created in run" > /run_file
+					RUN touch dir_example/file_that_will_be_deleted
+					RUN rm dir_example/file_that_will_be_deleted
+					RUN touch file_that_will_be_deleted
+					RUN rm file_that_will_be_deleted
+					RUN mkdir dir_that_will_be_deleted
+					RUN touch dir_that_will_be_deleted/dir_contents
+					RUN rm -r dir_that_will_be_deleted
 				`),
 			},
 		},
@@ -327,118 +333,3 @@ func TestImageExportDiff(t *testing.T) {
 	}
 }
 
-func TestMakeSlug(t *testing.T) {
-	tempDir, err := ioutil.TempDir("", "test_make_slug")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if *keepDat {
-		t.Logf("make slug test files kept in dir: %s", tempDir)
-	}
-
-	imgRoot := filepath.Join(tempDir, "image_root")
-	if err := os.Mkdir(imgRoot, 0770); err != nil {
-		t.Fatal(err)
-	}
-	if err := populateDirFromMock(imgRoot, &imageDiffFs); err != nil {
-		t.Fatal(err)
-	}
-	tarPath := filepath.Join(tempDir, "root.tar")
-	cmd := Command(
-		"tar",
-		"-C",
-		imgRoot,
-		"-cf",
-		tarPath,
-		".",
-	)
-	if err := cmd.Run(); err != nil {
-		t.Fatal(err)
-	}
-	var slugMetCnf SlugMetaDataConf
-	slugMetCnf.RegularAccess = true
-	slugMetCnf.IsolatedAccess = true
-	slugMetCnf.Name = "image2"
-	slugMetCnf.Version = 2
-	slugMetCnf.Parent = "image1"
-	slugMetCnf.Source = "slug"
-	slgMetCnfPath := filepath.Join(tempDir, "slug_metadata_conf.json")
-	slgMetCnfFile, err := os.Create(slgMetCnfPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.NewEncoder(slgMetCnfFile).Encode(slugMetCnf); err != nil {
-		t.Fatal(err)
-	}
-	slgMetCnfFile.Close()
-
-	slugPath := filepath.Join(tempDir, "image2_slug.tgz")
-	cmd = Command(
-		"go",
-		"run",
-		"../cmd/make_slug/main.go",
-		tarPath,
-		slgMetCnfPath,
-		slugPath,
-	)
-	if err := cmd.Run(); err != nil {
-		t.Fatal(err)
-	}
-
-	slgContentDir := filepath.Join(tempDir, "slug_content")
-	if err := os.Mkdir(slgContentDir, 0770); err != nil {
-		t.Fatal(err)
-	}
-	cmd = Command(
-		"tar",
-		"-C",
-		slgContentDir,
-		"-zxf",
-		slugPath,
-	)
-	if err := cmd.Run(); err != nil {
-		t.Fatal(err)
-	}
-	cnfPath := "METADATA/conf"
-	fileContent, err := ioutil.ReadFile(filepath.Join(slgContentDir, cnfPath))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var gotCnf SlugMetaDataConf
-	if err := json.Unmarshal(fileContent, &gotCnf); err != nil {
-		t.Fatal(err)
-	}
-	if gotCnf.Name != slugMetCnf.Name {
-		t.Fatal(fmt.Errorf("unexpected contents of %s", cnfPath))
-	}
-
-	diffContentDir := filepath.Join(tempDir, "diff_content")
-	if err := os.Mkdir(diffContentDir, 0770); err != nil {
-		t.Fatal(err)
-	}
-	diff := "diff.tar"
-	cmd = Command(
-		"tar",
-		"-C",
-		diffContentDir,
-		"-xf",
-		filepath.Join(slgContentDir, diff),
-	)
-	if err := cmd.Run(); err != nil {
-		t.Fatal(err)
-	}
-	gotMock, err := createMockFromDir(diffContentDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var reason string
-	if !mockFilesystemEqual(&imageDiffFs, gotMock, &reason) {
-		t.Fatal(fmt.Errorf("unexpected contents of %s, %s", diff, reason))
-	}
-
-	if !*keepDat {
-		if err := os.RemoveAll(tempDir); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
